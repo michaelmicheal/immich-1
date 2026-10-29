@@ -1,5 +1,7 @@
 import { BadRequestException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { DateTime } from 'luxon';
+import { createHash } from 'node:crypto';
+import { IncomingHttpHeaders } from 'node:http';
 import type { UserMetadataItem } from 'src/types.js';
 import { SALT_ROUNDS } from 'src/constants.js';
 import { UserAdmin } from 'src/database.js';
@@ -30,6 +32,9 @@ const dto = {
   email,
   password: 'password',
 };
+
+const tokenFor = (id: string, password: string) => createHash('sha256').update(`${id}-${password}`).digest('base64');
+const cookieFor = (token: string) => `immich_shared_link_token=${encodeURIComponent(token)}`;
 
 describe(AuthService.name, () => {
   let sut: AuthService;
@@ -509,6 +514,104 @@ describe(AuthService.name, () => {
       expect(mocks.sharedLink.getBySlug).toHaveBeenCalledWith('slug-123');
     });
   });
+
+  describe.each(['key-query', 'key-header', 'slug-query', 'slug-header'])(
+    'password-protected shared link - %s',
+    (method) => {
+      const sharedLink = { ...sharedLinkStub.valid, password: 'share-password' };
+      const validToken = tokenFor(sharedLink.id, sharedLink.password);
+      const headers: IncomingHttpHeaders = {};
+      const queryParams: Record<string, string> = {};
+      switch (method) {
+        case 'key-query': {
+          queryParams.key = sharedLink.key.toString('base64url');
+          break;
+        }
+        case 'key-header': {
+          headers['x-immich-share-key'] = sharedLink.key.toString('base64url');
+          break;
+        }
+        case 'slug-query': {
+          queryParams.slug = 'protected-share';
+          break;
+        }
+        case 'slug-header': {
+          headers['x-immich-share-slug'] = 'protected-share';
+          break;
+        }
+        // No default
+      }
+
+      const authenticate = (cookie?: string, sharedLinkLogin = false) =>
+        sut.authenticate({
+          headers: { ...headers, cookie },
+          queryParams,
+          metadata: { adminRoute: false, sharedLinkRoute: true, sharedLinkLogin, uri: '/assets/asset-id/original' },
+        });
+
+      beforeEach(() => {
+        mocks.sharedLink.getByKey.mockResolvedValue(sharedLink);
+        mocks.sharedLink.getBySlug.mockResolvedValue(sharedLink);
+        mocks.crypto.hashSha256.mockImplementation((value) => createHash('sha256').update(value).digest());
+      });
+
+      it.each([undefined, '', 'immich_shared_link_token=invalid', 'unrelated_cookie=value'])(
+        'should reject media access without a valid password cookie (%s)',
+        async (cookie) => {
+          await expect(authenticate(cookie)).rejects.toThrow('Password required');
+        },
+      );
+
+      it('should accept the token issued for the current share and password', async () => {
+        await expect(authenticate(cookieFor(validToken))).resolves.toEqual({ user: sharedLink.user, sharedLink });
+      });
+
+      it('should accept the current share token among tokens for multiple unlocked shares', async () => {
+        await expect(authenticate(cookieFor(`another-token,${validToken}`))).resolves.toEqual({
+          user: sharedLink.user,
+          sharedLink,
+        });
+      });
+
+      it('should reject a token issued for a different share with the same password', async () => {
+        await expect(authenticate(cookieFor(tokenFor('another-share-id', sharedLink.password)))).rejects.toThrow(
+          'Password required',
+        );
+      });
+
+      it('should reject an old token after changing the password', async () => {
+        const updated = { ...sharedLink, password: 'new-share-password' };
+        mocks.sharedLink.getByKey.mockResolvedValue(updated);
+        mocks.sharedLink.getBySlug.mockResolvedValue(updated);
+
+        await expect(authenticate(cookieFor(validToken))).rejects.toThrow('Password required');
+        await expect(authenticate(cookieFor(tokenFor(updated.id, updated.password)))).resolves.toEqual({
+          user: updated.user,
+          sharedLink: updated,
+        });
+      });
+
+      it('should still reject expired links even with a valid password cookie', async () => {
+        const expired = { ...sharedLink, expiresAt: new Date(0) };
+        mocks.sharedLink.getByKey.mockResolvedValue(expired);
+        mocks.sharedLink.getBySlug.mockResolvedValue(expired);
+
+        await expect(authenticate(cookieFor(validToken))).rejects.toBeInstanceOf(UnauthorizedException);
+      });
+
+      it('should allow the password login route without an existing password cookie', async () => {
+        await expect(authenticate(undefined, true)).resolves.toEqual({ user: sharedLink.user, sharedLink });
+      });
+
+      it('should not require a password cookie for links without a password', async () => {
+        const unprotected = { ...sharedLink, password: null };
+        mocks.sharedLink.getByKey.mockResolvedValue(unprotected);
+        mocks.sharedLink.getBySlug.mockResolvedValue(unprotected);
+
+        await expect(authenticate()).resolves.toEqual({ user: unprotected.user, sharedLink: unprotected });
+      });
+    },
+  );
 
   describe('validate - user token', () => {
     it('should throw if no token is found', async () => {

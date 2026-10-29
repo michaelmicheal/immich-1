@@ -30,6 +30,7 @@ import { isGranted } from 'src/utils/access.js';
 import { HumanReadableSize } from 'src/utils/bytes.js';
 import { generateProfileImage } from 'src/utils/profile-image.js';
 import { getUserAgentDetails } from 'src/utils/request.js';
+import { getSharedLinkToken } from 'src/utils/shared-link.js';
 
 export interface LoginDetails {
   isSecure: boolean;
@@ -57,6 +58,7 @@ export type ValidateRequest = {
   queryParams: Record<string, string>;
   metadata: {
     sharedLinkRoute: boolean;
+    sharedLinkLogin?: boolean;
     adminRoute: boolean;
     /** `false` explicitly means no permission is required, which otherwise defaults to `all` */
     permission?: Permission | false;
@@ -234,6 +236,15 @@ export class AuthService extends BaseService {
     if (authDto.sharedLink && !sharedLinkRoute) {
       this.logger.warn(`Denied access to non-shared route: ${uri}`);
       throw new ForbiddenException('Forbidden');
+    }
+
+    if (authDto.sharedLink?.password && !metadata.sharedLinkLogin) {
+      const cookies = parse(headers.cookie || '');
+      const tokens = cookies[ImmichCookie.SharedLinkToken]?.split(',') || [];
+      const token = getSharedLinkToken(this.cryptoRepository, authDto.sharedLink);
+      if (!tokens.includes(token)) {
+        throw new UnauthorizedException('Password required');
+      }
     }
 
     if (

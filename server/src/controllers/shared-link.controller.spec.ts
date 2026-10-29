@@ -1,3 +1,4 @@
+import { UnauthorizedException } from '@nestjs/common';
 import request from 'supertest';
 import { SharedLinkController } from 'src/controllers/shared-link.controller.js';
 import { Permission, SharedLinkType } from 'src/enum.js';
@@ -24,8 +25,26 @@ describe(SharedLinkController.name, () => {
     it('should be a shared link route', async () => {
       await request(ctx.getHttpServer()).get('/shared-links/me');
       expect(ctx.authenticate).toHaveBeenCalledWith(
-        expect.objectContaining({ metadata: expect.objectContaining({ sharedLinkRoute: true }) }),
+        expect.objectContaining({
+          metadata: expect.objectContaining({ sharedLinkRoute: true, sharedLinkLogin: false }),
+        }),
       );
+    });
+  });
+
+  describe('POST /shared-links/login', () => {
+    it('should allow the password login before the share has been unlocked', async () => {
+      service.login.mockRejectedValue(new UnauthorizedException('Invalid password'));
+
+      const { status } = await request(ctx.getHttpServer()).post('/shared-links/login').send({ password: 'password' });
+
+      expect(status).toBe(401);
+      expect(ctx.authenticate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ sharedLinkRoute: true, sharedLinkLogin: true }),
+        }),
+      );
+      expect(service.login).toHaveBeenCalled();
     });
   });
 

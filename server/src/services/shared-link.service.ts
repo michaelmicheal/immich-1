@@ -14,6 +14,7 @@ import {
 import { Permission, SharedLinkType } from 'src/enum.js';
 import { BaseService } from 'src/services/base.service.js';
 import { OpenGraphTags, findOrFail, getExternalDomain } from 'src/utils/misc.js';
+import { getSharedLinkToken } from 'src/utils/shared-link.js';
 
 @Injectable()
 export class SharedLinkService extends BaseService {
@@ -42,7 +43,7 @@ export class SharedLinkService extends BaseService {
 
     return {
       sharedLink: mapSharedLink(sharedLink, { stripAssetMetadata: !sharedLink.showExif }),
-      token: this.asToken({ id, password }),
+      token: getSharedLinkToken(this.cryptoRepository, { id, password }),
     };
   }
 
@@ -54,7 +55,7 @@ export class SharedLinkService extends BaseService {
     const sharedLink = await this.findOrFail(auth.user.id, auth.sharedLink.id);
     const { id, password } = sharedLink;
 
-    if (password && !authTokens.includes(this.asToken({ id, password }))) {
+    if (password && !authTokens.includes(getSharedLinkToken(this.cryptoRepository, { id, password }))) {
       throw new UnauthorizedException('Password required');
     }
 
@@ -230,9 +231,5 @@ export class SharedLinkService extends BaseService {
       description: sharedLink.description || `${assetCount} shared photos & videos`,
       imageUrl: new URL(imagePath, getExternalDomain(config.server, defaultDomain)).href,
     };
-  }
-
-  private asToken(sharedLink: { id: string; password: string }) {
-    return this.cryptoRepository.hashSha256(`${sharedLink.id}-${sharedLink.password}`).toString('base64');
   }
 }
